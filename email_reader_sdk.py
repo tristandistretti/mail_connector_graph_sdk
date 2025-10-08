@@ -1,0 +1,254 @@
+import os
+import asyncio
+from typing import Optional, List, Dict, Any
+from dotenv import load_dotenv
+
+from msgraph import GraphServiceClient
+from azure.identity import DeviceCodeCredential
+from msgraph.generated.models.message import Message
+from msgraph.generated.models.mail_folder import MailFolder
+from msgraph.generated.users.item.messages.messages_request_builder import MessagesRequestBuilder
+from msgraph.generated.users.item.mail_folders.mail_folders_request_builder import MailFoldersRequestBuilder
+
+# Configuration constants
+DEFAULT_MESSAGE_LIMIT: int = 50
+
+class EmailReaderSDK:
+    def __init__(self) -> None:
+        load_dotenv()
+        self.client_id: Optional[str] = os.getenv('CLIENT_ID')
+        self.tenant_id: Optional[str] = os.getenv('TENANT_ID')
+        
+        if not all([self.client_id, self.tenant_id]):
+            raise ValueError("Missing required environment variables. Check your .env file.")
+        
+        self.scopes: List[str] = [
+            "https://graph.microsoft.com/Mail.Read",
+            "https://graph.microsoft.com/Mail.ReadWrite",
+            "https://graph.microsoft.com/User.Read"
+        ]
+        
+        # Initialize credential for device code flow
+        self.credential: DeviceCodeCredential = DeviceCodeCredential(
+            client_id=self.client_id,
+            tenant_id=self.tenant_id
+        )
+        
+        # Initialize Graph Service Client
+        self.client: GraphServiceClient = GraphServiceClient(
+            credentials=self.credential,
+            scopes=self.scopes
+        )
+        
+        # Authentication state
+        self._authenticated: bool = False
+    
+    async def authenticate(self) -> bool:
+        """Ensure user is authenticated by making a simple API call"""
+        if self._authenticated:
+            return True
+            
+        try:
+            print("🔐 Authenticating with Microsoft Graph...")
+            user = await self.client.me.get()
+            if user:
+                print(f"✅ Successfully authenticated as: {user.display_name or 'Unknown User'}")
+                self._authenticated = True
+                return True
+        except Exception as e:
+            print(f"❌ Authentication failed: {e}")
+            return False
+        
+        return False
+    
+    async def get_inbox_messages(self, filter_unread: bool = False, top: int = DEFAULT_MESSAGE_LIMIT) -> Optional[List[Message]]:
+        """
+        Get inbox messages using Graph SDK
+        
+        Args:
+            filter_unread: If True, only get unread messages
+            top: Number of messages to retrieve (default: DEFAULT_MESSAGE_LIMIT)
+        """
+        if not await self.authenticate():
+            return None
+            
+        try:
+            print(f"📬 Fetching {'unread' if filter_unread else 'all'} inbox messages...")
+            
+            request_config = MessagesRequestBuilder.MessagesRequestBuilderGetRequestConfiguration(
+                query_parameters=MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(
+                    top=top,
+                    select=['id', 'subject', 'from', 'receivedDateTime', 'isRead', 'bodyPreview'],
+                    orderby=['receivedDateTime desc']
+                )
+            )
+            
+            # Add filter for unread messages if requested
+            if filter_unread:
+                request_config.query_parameters.filter = "isRead eq false"
+            
+            # Make the request - use direct messages endpoint instead of mail_folders.inbox
+            messages = await self.client.me.messages.get(request_configuration=request_config)
+            
+            if messages and messages.value:
+                print(f"✅ Retrieved {len(messages.value)} messages")
+                return messages.value
+            else:
+                print("📭 No messages found")
+                return []
+                
+        except Exception as e:
+            print(f"❌ Error fetching messages: {e}")
+            return None
+    
+    async def get_message_details(self, message_id: str) -> Optional[Message]:
+        """Get detailed information about a specific message"""
+        try:
+            message = await self.client.me.messages.by_message_id(message_id).get()
+            return message
+        except Exception as e:
+            print(f"❌ Error getting message details: {e}")
+            return None
+    
+    async def mark_as_read(self, message_id: str) -> bool:
+        """Mark a message as read"""
+        try:
+            # Create a message object with isRead = True
+            message_update = Message()
+            message_update.is_read = True
+            
+            await self.client.me.messages.by_message_id(message_id).patch(message_update)
+            return True
+        except Exception as e:
+            print(f"❌ Error marking message as read: {e}")
+            return False
+    
+    async def get_mail_folders(self) -> Optional[List[MailFolder]]:
+        """Get all mail folders"""
+        try:
+            folders = await self.client.me.mail_folders.get()
+            return folders.value if folders else []
+        except Exception as e:
+            print(f"❌ Error getting mail folders: {e}")
+            return None
+    
+    async def find_folder_by_name(self, folder_name: str) -> Optional[MailFolder]:
+        """Find a folder by name"""
+        folders = await self.get_mail_folders()
+        if not folders:
+            return None
+        
+        for folder in folders:
+            if folder.display_name and folder.display_name.lower() == folder_name.lower():
+                return folder
+        return None
+    
+    async def create_folder(self, folder_name: str) -> Optional[MailFolder]:
+        """Create a new mail folder"""
+        try:
+            new_folder = MailFolder()
+            new_folder.display_name = folder_name
+            
+            folder = await self.client.me.mail_folders.post(new_folder)
+            return folder
+        except Exception as e:
+            print(f"❌ Error creating folder: {e}")
+            return None
+    
+    async def ensure_folder_exists(self, folder_name: str) -> Optional[MailFolder]:
+        """Ensure a folder exists, create it if it doesn't"""
+        # First, try to find the folder
+        folder = await self.find_folder_by_name(folder_name)
+        
+        if folder:
+            print(f"✅ Folder '{folder_name}' already exists")
+            return folder
+        
+        # If not found, create it
+        print(f"📁 Creating folder '{folder_name}'...")
+        folder = await self.create_folder(folder_name)
+        
+        if folder:
+            print(f"✅ Folder '{folder_name}' created successfully")
+            return folder
+        else:
+            print(f"❌ Failed to create folder '{folder_name}'")
+            return None    
+
+    async def move_message(self, message_id: str, destination_folder_id: str) -> bool:
+        """Move a message to a specific folder"""
+        try:
+            from msgraph.generated.users.item.messages.item.move.move_post_request_body import MovePostRequestBody
+            
+            move_request = MovePostRequestBody()
+            move_request.destination_id = destination_folder_id
+            
+            await self.client.me.messages.by_message_id(message_id).move.post(move_request)
+            return True
+        except Exception as e:
+            print(f"❌ Error moving message: {e}")
+            return False
+    
+    async def process_emails_by_subject(self, search_term: str, target_folder: str = "daily meetings") -> bool:
+        """Find emails with specific term in subject and move them to target folder"""
+        print(f"🔍 Looking for emails with '{search_term}' in subject...")
+        
+        # Ensure target folder exists
+        folder = await self.ensure_folder_exists(target_folder)
+        if not folder or not folder.id:
+            return False
+        
+        folder_id: str = folder.id
+        
+        # Get inbox messages
+        messages = await self.get_inbox_messages(top=DEFAULT_MESSAGE_LIMIT)
+        if not messages:
+            print("No messages found to process")
+            return False
+        
+        moved_count: int = 0
+        search_term_lower: str = search_term.lower()
+        
+        for message in messages:
+            if message.subject and message.id:
+                subject: str = message.subject.lower()
+                
+                if search_term_lower in subject:
+                    print(f"📧 Found matching email: '{message.subject}'")
+                    
+                    if await self.move_message(message.id, folder_id):
+                        print(f"✅ Moved to '{target_folder}' folder")
+                        moved_count += 1
+                    else:
+                        print(f"❌ Failed to move email")
+        
+        print(f"\n📊 Summary: Moved {moved_count} emails containing '{search_term}' to '{target_folder}' folder")
+        return moved_count > 0
+    
+    def display_messages(self, messages: Optional[List[Message]]) -> None:
+        """Display messages in a readable format"""
+        if not messages:
+            print("No messages found or error occurred.")
+            return
+        
+        print(f"\nFound {len(messages)} messages:")
+        print("-" * 80)
+        
+        for i, message in enumerate(messages, 1):
+            status: str = "📧 UNREAD" if not message.is_read else "✅ READ"
+            sender: str = "Unknown"
+            if message.from_ and message.from_.email_address:
+                sender = message.from_.email_address.address or "Unknown"
+            
+            subject: str = message.subject or "No Subject"
+            received: str = str(message.received_date_time) if message.received_date_time else "Unknown"
+            body_preview: str = message.body_preview or ""
+            preview: str = body_preview[:100] + "..." if len(body_preview) > 100 else body_preview
+            
+            print(f"{i}. {status}")
+            print(f"   From: {sender}")
+            print(f"   Subject: {subject}")
+            print(f"   Received: {received}")
+            print(f"   Preview: {preview}")
+            print(f"   Message ID: {message.id or 'Unknown'}")
+            print("-" * 80)
