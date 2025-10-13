@@ -16,7 +16,13 @@ async def main() -> None:
         # Get all messages (read and unread)
         print("\n📬 Fetching all inbox messages...")
         all_messages: Optional[List[Message]] = await reader.get_inbox_messages(top=5)  # Keep small for demo
-        reader.display_messages(all_messages)
+
+        # # Display one message in detail
+        # if all_messages and len(all_messages) > 0:
+        #     print(f"\n🔍 DETAILED VIEW OF FIRST EMAIL:")
+        #     message_details = await reader.get_message_details(all_messages[0].id)
+        #     reader.display_email_beautifully(message_details)
+        #     return
         
         # Get only unread messages
         print("\n📩 Fetching unread messages...")

@@ -1,7 +1,9 @@
 import os
 import asyncio
+import re
 from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
+from html import unescape
 
 from msgraph import GraphServiceClient
 from azure.identity import DeviceCodeCredential
@@ -78,7 +80,7 @@ class EmailReaderSDK:
             request_config = MessagesRequestBuilder.MessagesRequestBuilderGetRequestConfiguration(
                 query_parameters=MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(
                     top=top,
-                    select=['id', 'subject', 'from', 'receivedDateTime', 'isRead', 'bodyPreview'],
+                    select=['id', 'subject', 'from', 'toRecipients', 'receivedDateTime', 'isRead', 'bodyPreview', 'body', 'hasAttachments'],
                     orderby=['receivedDateTime desc']
                 )
             )
@@ -235,6 +237,33 @@ class EmailReaderSDK:
         print("-" * 80)
         
         for i, message in enumerate(messages, 1):
+            # response format from graph api / message variable format
+            # {
+            #     "value": [
+            #         {
+            #         "id": "message_id_here",
+            #         "subject": "Meeting Tomorrow",
+            #         "from": {
+            #             "email_address": {
+            #             "address": "sender@company.com",
+            #             "name": "John Doe"
+            #             }
+            #         },
+            #         "to_recipients": {
+            #             "email_address": {
+            #             "address": "sender@company.com",
+            #             "name": "John Doe"
+            #             }
+            #         },
+            #         "received_date_time": "2024-01-15T10:30:00Z",
+            #         "is_read": false,
+            #         "body_preview": "Hi, just wanted to confirm our meeting...",
+            #         "body",
+            #         "has_attachments": false
+            #         }
+            #     ]
+            # }
+
             status: str = "📧 UNREAD" if not message.is_read else "✅ READ"
             sender: str = "Unknown"
             if message.from_ and message.from_.email_address:
@@ -252,3 +281,101 @@ class EmailReaderSDK:
             print(f"   Preview: {preview}")
             print(f"   Message ID: {message.id or 'Unknown'}")
             print("-" * 80)
+
+    def html_to_text(self, html_content: str) -> str:
+        """Convert HTML content to readable plain text"""
+        if not html_content:
+            return ""
+
+        # Remove script and style elements
+        html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+        html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+
+        # Replace common HTML elements with text equivalents
+        replacements = [
+            (r'<br\s*/?>', '\n'),
+            (r'</?p[^>]*>', '\n'),
+            (r'</?div[^>]*>', '\n'),
+            (r'<hr[^>]*>', '\n' + '-' * 50 + '\n'),
+            (r'</?b[^>]*>', '**'),
+            (r'</?strong[^>]*>', '**'),
+            (r'</?i[^>]*>', '*'),
+            (r'</?em[^>]*>', '*'),
+            (r'<a[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', r'\2 (\1)'),
+        ]
+
+        for pattern, replacement in replacements:
+            html_content = re.sub(pattern, replacement, html_content, flags=re.IGNORECASE | re.DOTALL)
+
+        # Remove all remaining HTML tags
+        html_content = re.sub(r'<[^>]+>', '', html_content)
+
+        # Decode HTML entities
+        html_content = unescape(html_content)
+
+        # Clean up whitespace
+        lines = html_content.split('\n')
+        cleaned_lines = []
+
+        for line in lines:
+            line = line.strip()
+            if line:  # Only keep non-empty lines
+                cleaned_lines.append(line)
+
+        # Join lines and limit consecutive newlines
+        result = '\n'.join(cleaned_lines)
+        result = re.sub(r'\n{3,}', '\n\n', result)  # Max 2 consecutive newlines
+
+        return result.strip()
+
+    def display_email_beautifully(self, message: Message) -> None:
+        """Display a single email in a beautiful, readable format"""
+        if not message:
+            print("❌ No message to display")
+            return
+
+        # Header section
+        print("\n" + "=" * 80)
+        print("📧 EMAIL DETAILS")
+        print("=" * 80)
+
+        # Basic info
+        status = "📧 UNREAD" if not message.is_read else "✅ READ"
+        print(f"Status: {status}")
+
+        if message.from_ and message.from_.email_address:
+            sender_name = message.from_.email_address.name or "Unknown"
+            sender_email = message.from_.email_address.address or "Unknown"
+            print(f"From: {sender_name} <{sender_email}>")
+
+        print(f"Subject: {message.subject or 'No Subject'}")
+        print(f"Received: {message.received_date_time or 'Unknown'}")
+
+        print("-" * 80)
+
+        # Body content
+        if message.body and message.body.content:
+            body_type = str(message.body.content_type) if message.body.content_type else "Unknown"
+            print(f"Body Type: {body_type}")
+            print("-" * 80)
+
+            if body_type.lower() == "bodytype.html":
+                # Convert HTML to readable text
+                readable_content = self.html_to_text(message.body.content)
+                print("📄 EMAIL CONTENT:")
+                print(readable_content)
+            else:
+                # Plain text content
+                print("📄 EMAIL CONTENT:")
+                print(message.body.content)
+        else:
+            print("📄 EMAIL CONTENT: No content available")
+
+        print("=" * 80)
+
+        # Attachments info
+        if hasattr(message, 'has_attachments') and message.has_attachments:
+            print("📎 This email has attachments")
+
+        print(f"Message ID: {message.id or 'Unknown'}")
+        print("=" * 80)
