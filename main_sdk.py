@@ -24,25 +24,12 @@ async def main() -> None:
         #     reader.display_email_beautifully(message_details)
         #     return
         
+        reader.display_email_list_beautifully(all_messages)
+        
         # Get only unread messages
         print("\n📩 Fetching unread messages...")
         unread_messages: Optional[List[Message]] = await reader.get_inbox_messages(filter_unread=True, top=10)  # Keep small for demo
-        reader.display_messages(unread_messages)
-        
-        # Example: Get details of the first message if available
-        if all_messages and len(all_messages) > 0:
-            first_message = all_messages[0]
-            if first_message.id:
-                print(f"\n📄 Getting details for first message...")
-                message_details: Optional[Message] = await reader.get_message_details(first_message.id)
-                
-                if message_details:
-                    print(f"Subject: {message_details.subject or 'No Subject'}")
-                    body_type = "Unknown"
-                    if message_details.body and message_details.body.content_type:
-                        body_type = str(message_details.body.content_type)
-                    print(f"Body Type: {body_type}")
-                    print("✅ Full message body available in message_details.body.content")
+        reader.display_email_list_beautifully(unread_messages)
         
         # Process emails with specific subject terms - move them to specific folder
         print("\n" + "="*60)
