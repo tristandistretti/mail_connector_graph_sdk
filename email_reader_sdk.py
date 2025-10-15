@@ -7,13 +7,63 @@ from html import unescape
 
 from msgraph import GraphServiceClient
 from azure.identity import DeviceCodeCredential
+from azure.core.credentials import AccessToken
 from msgraph.generated.models.message import Message
 from msgraph.generated.models.mail_folder import MailFolder
 from msgraph.generated.users.item.messages.messages_request_builder import MessagesRequestBuilder
 from msgraph.generated.users.item.mail_folders.mail_folders_request_builder import MailFoldersRequestBuilder
+import json, time
 
 # Configuration constants
-DEFAULT_MESSAGE_LIMIT: int = 50
+DEFAULT_MESSAGE_LIMIT: int = 10
+
+class CachedTokenCredential:
+    """Custom credential that uses cached tokens when available"""
+    
+    def __init__(self, device_credential: DeviceCodeCredential, token_file: str = "token.json"):
+        self.device_credential = device_credential
+        self.token_file = token_file
+    
+    def get_token(self, *scopes, **kwargs):
+        """Get token - use cached if valid, otherwise get new one"""
+        # Try cached token first
+        cached_token = self._get_cached_token()
+        if cached_token:
+            return cached_token
+
+        return self.device_credential.get_token(*scopes, **kwargs)
+    
+    def _get_cached_token(self) -> Optional[AccessToken]:
+        """Get cached token if it's still valid"""
+        try:
+            if os.path.exists(self.token_file):
+                with open(self.token_file, "r") as f:
+                    token_data = json.load(f)
+                
+                access_token = token_data.get("access_token")
+                expires_on = token_data.get("expires_on")
+                
+                if access_token and expires_on:
+                    current_time = time.time()
+                    
+                    if current_time < expires_on:
+                        return AccessToken(access_token, expires_on)
+        except Exception:
+            pass
+        
+        return None
+    
+    def save_token(self, token: AccessToken):
+        """Save token to cache file"""
+        try:
+            data = {
+                "access_token": token.token,
+                "expires_on": token.expires_on
+            }
+            with open(self.token_file, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"⚠️ Failed to save token: {e}")
 
 class EmailReaderSDK:
     def __init__(self) -> None:
@@ -30,11 +80,14 @@ class EmailReaderSDK:
             "https://graph.microsoft.com/User.Read"
         ]
         
-        # Initialize credential for device code flow
-        self.credential: DeviceCodeCredential = DeviceCodeCredential(
+        # Initialize device code credential
+        device_credential = DeviceCodeCredential(
             client_id=self.client_id,
             tenant_id=self.tenant_id
         )
+        
+        # Initialize custom credential that uses cached tokens
+        self.credential = CachedTokenCredential(device_credential)
         
         # Initialize Graph Service Client
         self.client: GraphServiceClient = GraphServiceClient(
@@ -44,16 +97,26 @@ class EmailReaderSDK:
         
         # Authentication state
         self._authenticated: bool = False
-    
+
     async def authenticate(self) -> bool:
         """Ensure user is authenticated by making a simple API call"""
         if self._authenticated:
             return True
-            
+        
         try:
-            print("🔐 Authenticating with Microsoft Graph...")
+            # Check if we have a cached token
+            if self.credential._get_cached_token():
+                print("🔐 Using cached token - no authentication needed!")
+            else:
+                print("🔐 Authenticating with Microsoft Graph...")
+            
             user = await self.client.me.get()
+            
             if user:
+                # Save the token that was just used
+                token = self.credential.get_token("https://graph.microsoft.com/.default")
+                self.credential.save_token(token)
+                
                 print(f"✅ Successfully authenticated as: {user.display_name or 'Unknown User'}")
                 self._authenticated = True
                 return True
