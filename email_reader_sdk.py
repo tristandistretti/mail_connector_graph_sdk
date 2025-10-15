@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from html import unescape
 
 from msgraph import GraphServiceClient
-from azure.identity import DeviceCodeCredential, TokenCachePersistenceOptions
+from azure.identity import DeviceCodeCredential
 from azure.core.credentials import AccessToken
 from msgraph.generated.models.message import Message
 from msgraph.generated.models.mail_folder import MailFolder
@@ -81,19 +81,14 @@ class EmailReaderSDK:
             "https://graph.microsoft.com/User.Read"
         ]
         
-        # Configure persistent token caching for server-like behavior
-        cache_options = TokenCachePersistenceOptions(
-            allow_unencrypted_storage=True  # For development - use default cache name
+        # Initialize device code credential
+        device_credential = DeviceCodeCredential(
+            client_id=self.client_id,
+            tenant_id=self.tenant_id
         )
         
-        # Initialize credential with persistent token caching
-        # offline_access is automatically requested by DeviceCodeCredential for refresh tokens
-        self.credential = DeviceCodeCredential(
-            client_id=self.client_id,
-            tenant_id=self.tenant_id,
-            cache_persistence_options=cache_options,
-            disable_automatic_authentication=False
-        )
+        # Use custom token caching that saves to token.json
+        self.credential = CachedTokenCredential(device_credential)
         
         # Initialize Graph Service Client
         self.client: GraphServiceClient = GraphServiceClient(
@@ -108,11 +103,19 @@ class EmailReaderSDK:
             return True
         
         try:
-            print("🔐 Authenticating with Microsoft Graph...")
+            # Check if we have a cached token
+            if self.credential._get_cached_token():
+                print("🔐 Using cached token - no authentication needed!")
+            else:
+                print("🔐 Authenticating with Microsoft Graph...")
             
             user = await self.client.me.get()
             
             if user:
+                # Save the token that was just used
+                token = self.credential.get_token("https://graph.microsoft.com/.default")
+                self.credential.save_token(token)
+                
                 print(f"✅ Successfully authenticated as: {user.display_name or 'Unknown User'}")
                 self._authenticated = True
                 return True
@@ -134,6 +137,7 @@ class EmailReaderSDK:
             if token:
                 from datetime import datetime
                 import time
+                import json
                 
                 expires_at = datetime.fromtimestamp(token.expires_on)
                 time_left = token.expires_on - time.time()
@@ -163,45 +167,38 @@ class EmailReaderSDK:
             print(f"❌ Token check failed: {e}")
             print("💡 Try running authentication first")
         
-        # Check cache file existence
-        import os
-        import glob
-        
-        # Check common cache locations
-        cache_locations = [
-            os.path.expanduser("~/.azure/msal_token_cache.bin"),
-            os.path.expanduser("~/.cache/msal_token_cache.bin"),
-            os.path.expanduser("~/.IdentityService/msal_token_cache.*"),
-            os.path.expanduser("~/.IdentityService/*.cae"),
-            os.path.expanduser("~/.IdentityService/*.nocae")
-        ]
-        
-        print("\n📁 Cache File Status:")
-        cache_found = False
-        for location in cache_locations:
-            if '*' in location:
-                # Handle glob patterns
-                matches = glob.glob(location)
-                if matches:
-                    for match in matches:
-                        size = os.path.getsize(match)
-                        print(f"✅ Found: {match} ({size} bytes)")
-                        cache_found = True
+        # Check token.json file
+        print("\n📁 Token File Status:")
+        token_file = "token.json"
+        if os.path.exists(token_file):
+            size = os.path.getsize(token_file)
+            print(f"✅ Found: {token_file} ({size} bytes)")
+            
+            # Try to read and display token info
+            try:
+                with open(token_file, "r") as f:
+                    token_data = json.load(f)
+                
+                expires_on = token_data.get("expires_on")
+                if expires_on:
+                    from datetime import datetime
+                    expires_at = datetime.fromtimestamp(expires_on)
+                    time_left = expires_on - time.time()
+                    print(f"   Token expires: {expires_at}")
+                    print(f"   Time left: {time_left/60:.1f} minutes")
+                    
+                    if time_left > 0:
+                        print("✅ Token persistence: Working correctly")
+                    else:
+                        print("⚠️  Token has expired")
                 else:
-                    print(f"❌ Not found: {location}")
-            else:
-                # Handle exact paths
-                if os.path.exists(location):
-                    size = os.path.getsize(location)
-                    print(f"✅ Found: {location} ({size} bytes)")
-                    cache_found = True
-                else:
-                    print(f"❌ Not found: {location}")
-        
-        if cache_found:
-            print("✅ Token persistence: Working correctly")
+                    print("⚠️  Invalid token format")
+                    
+            except Exception as e:
+                print(f"⚠️  Error reading token file: {e}")
         else:
-            print("⚠️  No cache files found - tokens may not be persisting")
+            print(f"❌ Not found: {token_file}")
+            print("💡 Token will be created after first authentication")
         
         print("=" * 50)
     
@@ -373,32 +370,6 @@ class EmailReaderSDK:
         print("-" * 80)
         
         for i, message in enumerate(messages, 1):
-            # response format from graph api / message variable format
-            # {
-            #     "value": [
-            #         {
-            #         "id": "message_id_here",
-            #         "subject": "Meeting Tomorrow",
-            #         "from": {
-            #             "email_address": {
-            #             "address": "sender@company.com",
-            #             "name": "John Doe"
-            #             }
-            #         },
-            #         "to_recipients": {
-            #             "email_address": {
-            #             "address": "sender@company.com",
-            #             "name": "John Doe"
-            #             }
-            #         },
-            #         "received_date_time": "2024-01-15T10:30:00Z",
-            #         "is_read": false,
-            #         "body_preview": "Hi, just wanted to confirm our meeting...",
-            #         "body",
-            #         "has_attachments": false
-            #         }
-            #     ]
-            # }
 
             status: str = "📧 UNREAD" if not message.is_read else "✅ READ"
             sender: str = "Unknown"
