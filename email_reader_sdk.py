@@ -1,6 +1,7 @@
 import os
+import asyncio
 import re
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
 from html import unescape
 
@@ -10,9 +11,59 @@ from azure.core.credentials import AccessToken
 from msgraph.generated.models.message import Message
 from msgraph.generated.models.mail_folder import MailFolder
 from msgraph.generated.users.item.messages.messages_request_builder import MessagesRequestBuilder
+from msgraph.generated.users.item.mail_folders.mail_folders_request_builder import MailFoldersRequestBuilder
+import json, time
 
 # Configuration constants
 DEFAULT_MESSAGE_LIMIT: int = 10
+
+class CachedTokenCredential:
+    """Custom credential that uses cached tokens when available"""
+    
+    def __init__(self, device_credential: DeviceCodeCredential, token_file: str = "token.json"):
+        self.device_credential = device_credential
+        self.token_file = token_file
+    
+    def get_token(self, *scopes, **kwargs):
+        """Get token - use cached if valid, otherwise get new one"""
+        # Try cached token first
+        cached_token = self._get_cached_token()
+        if cached_token:
+            return cached_token
+
+        return self.device_credential.get_token(*scopes, **kwargs)
+    
+    def _get_cached_token(self) -> Optional[AccessToken]:
+        """Get cached token if it's still valid"""
+        try:
+            if os.path.exists(self.token_file):
+                with open(self.token_file, "r") as f:
+                    token_data = json.load(f)
+                
+                access_token = token_data.get("access_token")
+                expires_on = token_data.get("expires_on")
+                
+                if access_token and expires_on:
+                    current_time = time.time()
+                    
+                    if current_time < expires_on:
+                        return AccessToken(access_token, expires_on)
+        except Exception:
+            pass
+        
+        return None
+    
+    def save_token(self, token: AccessToken):
+        """Save token to cache file"""
+        try:
+            data = {
+                "access_token": token.token,
+                "expires_on": token.expires_on
+            }
+            with open(self.token_file, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"⚠️ Failed to save token: {e}")
 
 class EmailReaderSDK:
     def __init__(self) -> None:
@@ -285,27 +336,88 @@ class EmailReaderSDK:
         if not folder or not folder.id:
             return False
         
+        folder_id: str = folder.id
+        
+        # Get inbox messages
         messages = await self.get_inbox_messages(top=DEFAULT_MESSAGE_LIMIT)
         if not messages:
             print("No messages found to process")
             return False
         
-        moved_count = 0
-        search_term_lower = search_term.lower()
+        moved_count: int = 0
+        search_term_lower: str = search_term.lower()
         
         for message in messages:
-            if message.subject and message.id and search_term_lower in message.subject.lower():
-                print(f"📧 Found matching email: '{message.subject}'")
+            if message.subject and message.id:
+                subject: str = message.subject.lower()
                 
-                if await self.move_message(message.id, folder.id):
-                    print(f"✅ Moved to '{target_folder}' folder")
-                    moved_count += 1
-                else:
-                    print(f"❌ Failed to move email")
+                if search_term_lower in subject:
+                    print(f"📧 Found matching email: '{message.subject}'")
+                    
+                    if await self.move_message(message.id, folder_id):
+                        print(f"✅ Moved to '{target_folder}' folder")
+                        moved_count += 1
+                    else:
+                        print(f"❌ Failed to move email")
         
         print(f"\n📊 Summary: Moved {moved_count} emails containing '{search_term}' to '{target_folder}' folder")
         return moved_count > 0
     
+    def display_messages(self, messages: Optional[List[Message]]) -> None:
+        """Display messages in a readable format"""
+        if not messages:
+            print("No messages found or error occurred.")
+            return
+        
+        print(f"\nFound {len(messages)} messages:")
+        print("-" * 80)
+        
+        for i, message in enumerate(messages, 1):
+            # response format from graph api / message variable format
+            # {
+            #     "value": [
+            #         {
+            #         "id": "message_id_here",
+            #         "subject": "Meeting Tomorrow",
+            #         "from": {
+            #             "email_address": {
+            #             "address": "sender@company.com",
+            #             "name": "John Doe"
+            #             }
+            #         },
+            #         "to_recipients": {
+            #             "email_address": {
+            #             "address": "sender@company.com",
+            #             "name": "John Doe"
+            #             }
+            #         },
+            #         "received_date_time": "2024-01-15T10:30:00Z",
+            #         "is_read": false,
+            #         "body_preview": "Hi, just wanted to confirm our meeting...",
+            #         "body",
+            #         "has_attachments": false
+            #         }
+            #     ]
+            # }
+
+            status: str = "📧 UNREAD" if not message.is_read else "✅ READ"
+            sender: str = "Unknown"
+            if message.from_ and message.from_.email_address:
+                sender = message.from_.email_address.address or "Unknown"
+            
+            subject: str = message.subject or "No Subject"
+            received: str = str(message.received_date_time) if message.received_date_time else "Unknown"
+            body_preview: str = message.body_preview or ""
+            preview: str = body_preview[:100] + "..." if len(body_preview) > 100 else body_preview
+            
+            print(f"{i}. {status}")
+            print(f"   From: {sender}")
+            print(f"   Subject: {subject}")
+            print(f"   Received: {received}")
+            print(f"   Preview: {preview}")
+            print(f"   Message ID: {message.id or 'Unknown'}")
+            print("-" * 80)
+
     def html_to_text(self, html_content: str) -> str:
         """Convert HTML content to readable plain text"""
         if not html_content:
@@ -399,40 +511,3 @@ class EmailReaderSDK:
 
         print(f"Message ID: {message.id or 'Unknown'}")
         print("=" * 80)
-    
-    def display_email_list_beautifully(self, messages: Optional[List[Message]]) -> None:
-        """Display a list of emails in a beautiful, compact format"""
-        if not messages:
-            print("📭 No messages found")
-            return
-        
-        print(f"\n📬 INBOX SUMMARY ({len(messages)} messages)")
-        print("=" * 100)
-        
-        for i, message in enumerate(messages, 1):
-            status_icon = "📧" if not message.is_read else "✅"
-
-            sender = "Unknown Sender"
-            if message.from_ and message.from_.email_address:
-                sender_name = message.from_.email_address.name
-                sender_email = message.from_.email_address.address
-                if sender_name and sender_email:
-                    sender = f"{sender_name} <{sender_email}>"
-                elif sender_email:
-                    sender = sender_email
-                elif sender_name:
-                    sender = sender_name
-            
-            subject = message.subject or "No Subject"
-            date = str(message.received_date_time)[:19] if message.received_date_time else "Unknown Date"
-            preview = (message.body_preview[:80] + "...") if message.body_preview and len(message.body_preview) > 80 else (message.body_preview or "")
-            
-            print(f"{i:2d}. {status_icon} {subject}")
-            print(f"    👤 {sender}")
-            print(f"    📅 {date}")
-            if preview:
-                print(f"    💬 {preview}")
-            print(f"    🆔 {message.id}")
-            print("-" * 100)
-        
-        print("=" * 100)
