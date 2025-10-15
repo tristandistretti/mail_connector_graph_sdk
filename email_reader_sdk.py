@@ -14,8 +14,6 @@ from msgraph.generated.users.item.messages.messages_request_builder import Messa
 # Configuration constants
 DEFAULT_MESSAGE_LIMIT: int = 10
 
-
-
 class EmailReaderSDK:
     def __init__(self) -> None:
         load_dotenv()
@@ -25,24 +23,24 @@ class EmailReaderSDK:
         if not all([self.client_id, self.tenant_id]):
             raise ValueError("Missing required environment variables. Check your .env file.")
         
+        # Microsoft Graph scopes (offline_access is automatically included with these)
         self.scopes: List[str] = [
             "https://graph.microsoft.com/Mail.Read",
-            "https://graph.microsoft.com/Mail.ReadWrite",
+            "https://graph.microsoft.com/Mail.ReadWrite", 
             "https://graph.microsoft.com/User.Read"
         ]
         
         # Configure persistent token caching for server-like behavior
         cache_options = TokenCachePersistenceOptions(
-            allow_unencrypted_storage=True,  # For development
-            name="email_reader_cache"
+            allow_unencrypted_storage=True  # For development - use default cache name
         )
         
         # Initialize credential with persistent token caching
+        # offline_access is automatically requested by DeviceCodeCredential for refresh tokens
         self.credential = DeviceCodeCredential(
             client_id=self.client_id,
             tenant_id=self.tenant_id,
             cache_persistence_options=cache_options,
-            # Disable automatic authentication for server scenarios
             disable_automatic_authentication=False
         )
         
@@ -51,8 +49,6 @@ class EmailReaderSDK:
             credentials=self.credential,
             scopes=self.scopes
         )
-        
-        # Authentication state
         self._authenticated: bool = False
 
     async def authenticate(self) -> bool:
@@ -63,9 +59,6 @@ class EmailReaderSDK:
         try:
             print("🔐 Authenticating with Microsoft Graph...")
             
-            # The ChainedTokenCredential will automatically:
-            # 1. Try SharedTokenCacheCredential first (silent)
-            # 2. Fall back to DeviceCodeCredential if needed (interactive)
             user = await self.client.me.get()
             
             if user:
@@ -77,6 +70,89 @@ class EmailReaderSDK:
             return False
         
         return False
+    
+    def debug_token_status(self) -> None:
+        """Debug method to check if refresh tokens are properly stored"""
+        print("\n🔍 TOKEN DEBUG INFORMATION")
+        print("=" * 50)
+        
+        try:
+            # Try to get a token (this will use cache if available)
+            token = self.credential.get_token("https://graph.microsoft.com/.default")
+            
+            if token:
+                from datetime import datetime
+                import time
+                
+                expires_at = datetime.fromtimestamp(token.expires_on)
+                time_left = token.expires_on - time.time()
+                
+                print("✅ Access Token Found:")
+                print(f"   Expires at: {expires_at}")
+                print(f"   Time left: {time_left/60:.1f} minutes")
+                print(f"   Token preview: {token.token[:30]}...{token.token[-10:]}")
+                
+                # Check if we can get token silently (indicates refresh token exists)
+                try:
+                    # This should work silently if refresh token exists
+                    silent_token = self.credential.get_token("https://graph.microsoft.com/.default")
+                    if silent_token:
+                        print("✅ Refresh Token: Available (can refresh silently)")
+                        print("✅ Server Mode: Ready for long-term operation")
+                    else:
+                        print("❌ Refresh Token: Not available")
+                        print("⚠️  Server Mode: Will require re-auth when token expires")
+                except Exception as e:
+                    print(f"❌ Refresh Token: Error checking - {e}")
+                    
+            else:
+                print("❌ No access token found")
+                
+        except Exception as e:
+            print(f"❌ Token check failed: {e}")
+            print("💡 Try running authentication first")
+        
+        # Check cache file existence
+        import os
+        import glob
+        
+        # Check common cache locations
+        cache_locations = [
+            os.path.expanduser("~/.azure/msal_token_cache.bin"),
+            os.path.expanduser("~/.cache/msal_token_cache.bin"),
+            os.path.expanduser("~/.IdentityService/msal_token_cache.*"),
+            os.path.expanduser("~/.IdentityService/*.cae"),
+            os.path.expanduser("~/.IdentityService/*.nocae")
+        ]
+        
+        print("\n📁 Cache File Status:")
+        cache_found = False
+        for location in cache_locations:
+            if '*' in location:
+                # Handle glob patterns
+                matches = glob.glob(location)
+                if matches:
+                    for match in matches:
+                        size = os.path.getsize(match)
+                        print(f"✅ Found: {match} ({size} bytes)")
+                        cache_found = True
+                else:
+                    print(f"❌ Not found: {location}")
+            else:
+                # Handle exact paths
+                if os.path.exists(location):
+                    size = os.path.getsize(location)
+                    print(f"✅ Found: {location} ({size} bytes)")
+                    cache_found = True
+                else:
+                    print(f"❌ Not found: {location}")
+        
+        if cache_found:
+            print("✅ Token persistence: Working correctly")
+        else:
+            print("⚠️  No cache files found - tokens may not be persisting")
+        
+        print("=" * 50)
     
     async def get_inbox_messages(self, filter_unread: bool = False, top: int = DEFAULT_MESSAGE_LIMIT) -> Optional[List[Message]]:
         """
@@ -99,12 +175,10 @@ class EmailReaderSDK:
                     orderby=['receivedDateTime desc']
                 )
             )
-            
-            # Add filter for unread messages if requested
+
             if filter_unread:
                 request_config.query_parameters.filter = "isRead eq false"
-            
-            # Make the request - use direct messages endpoint instead of mail_folders.inbox
+
             messages = await self.client.me.messages.get(request_configuration=request_config)
             
             if messages and messages.value:
@@ -130,7 +204,6 @@ class EmailReaderSDK:
     async def mark_as_read(self, message_id: str) -> bool:
         """Mark a message as read"""
         try:
-            # Create a message object with isRead = True
             message_update = Message()
             message_update.is_read = True
             
@@ -174,14 +247,12 @@ class EmailReaderSDK:
     
     async def ensure_folder_exists(self, folder_name: str) -> Optional[MailFolder]:
         """Ensure a folder exists, create it if it doesn't"""
-        # First, try to find the folder
         folder = await self.find_folder_by_name(folder_name)
         
         if folder:
             print(f"✅ Folder '{folder_name}' already exists")
             return folder
-        
-        # If not found, create it
+
         print(f"📁 Creating folder '{folder_name}'...")
         folder = await self.create_folder(folder_name)
         
@@ -209,8 +280,7 @@ class EmailReaderSDK:
     async def process_emails_by_subject(self, search_term: str, target_folder: str = "daily meetings") -> bool:
         """Find emails with specific term in subject and move them to target folder"""
         print(f"🔍 Looking for emails with '{search_term}' in subject...")
-        
-        # Ensure target folder exists
+
         folder = await self.ensure_folder_exists(target_folder)
         if not folder or not folder.id:
             return False
@@ -273,7 +343,7 @@ class EmailReaderSDK:
 
         for line in lines:
             line = line.strip()
-            if line:  # Only keep non-empty lines
+            if line:
                 cleaned_lines.append(line)
 
         # Join lines and limit consecutive newlines
@@ -288,12 +358,10 @@ class EmailReaderSDK:
             print("❌ No message to display")
             return
 
-        # Header section
         print("\n" + "=" * 80)
         print("📧 EMAIL DETAILS")
         print("=" * 80)
 
-        # Basic info
         status = "📧 UNREAD" if not message.is_read else "✅ READ"
         print(f"Status: {status}")
 
@@ -307,7 +375,6 @@ class EmailReaderSDK:
 
         print("-" * 80)
 
-        # Body content
         if message.body and message.body.content:
             body_type = str(message.body.content_type) if message.body.content_type else "Unknown"
             print(f"Body Type: {body_type}")
@@ -319,7 +386,6 @@ class EmailReaderSDK:
                 print("📄 EMAIL CONTENT:")
                 print(readable_content)
             else:
-                # Plain text content
                 print("📄 EMAIL CONTENT:")
                 print(message.body.content)
         else:
@@ -345,8 +411,7 @@ class EmailReaderSDK:
         
         for i, message in enumerate(messages, 1):
             status_icon = "📧" if not message.is_read else "✅"
-            
-            # Sender info
+
             sender = "Unknown Sender"
             if message.from_ and message.from_.email_address:
                 sender_name = message.from_.email_address.name

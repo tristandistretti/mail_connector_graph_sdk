@@ -54,12 +54,10 @@ class EmailServer:
         self.running = True
         print("✅ Server started successfully!")
         
-        # Set up signal handlers for graceful shutdown
         loop = asyncio.get_event_loop()
         for sig in [signal.SIGINT, signal.SIGTERM]:
             loop.add_signal_handler(sig, self._signal_handler, sig)
         
-        # Main server loop
         while self.running:
             try:
                 await self._process_emails()
@@ -87,7 +85,6 @@ class EmailServer:
                 else:
                     print(f"🔄 Continuing in {ERROR_RETRY_MINUTES} minutes...")
                 
-                # Use the same interruptible sleep for error retry
                 try:
                     await asyncio.wait_for(
                         self.shutdown_event.wait(), 
@@ -108,13 +105,11 @@ class EmailServer:
             if self.shutdown_event.is_set():
                 return
             
-            # Example: Process daily standup emails
             await self.reader.process_emails_by_subject("daily stand up", "daily meetings")
             
             if self.shutdown_event.is_set():
                 return
             
-            # Example: Get unread messages count
             unread_messages = await self.reader.get_inbox_messages(filter_unread=True, top=50)
             if unread_messages:
                 print(f"�N Found {len(unread_messages)} unread messages")
@@ -137,7 +132,6 @@ class EmailServer:
 
 async def main():
     """Main server entry point"""
-    # Create server - intervals controlled by global variables
     server = EmailServer()
     
     try:
