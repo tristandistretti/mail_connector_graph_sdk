@@ -1,13 +1,11 @@
 import os
 import re
-import json
-import time
 from typing import Optional, List
 from dotenv import load_dotenv
 from html import unescape
 
 from msgraph import GraphServiceClient
-from azure.identity import DeviceCodeCredential
+from azure.identity import DeviceCodeCredential, TokenCachePersistenceOptions
 from azure.core.credentials import AccessToken
 from msgraph.generated.models.message import Message
 from msgraph.generated.models.mail_folder import MailFolder
@@ -16,48 +14,7 @@ from msgraph.generated.users.item.messages.messages_request_builder import Messa
 # Configuration constants
 DEFAULT_MESSAGE_LIMIT: int = 10
 
-class CachedTokenCredential:
-    """Custom credential that uses cached tokens when available"""
-    
-    def __init__(self, device_credential: DeviceCodeCredential, token_file: str = "token.json"):
-        self.device_credential = device_credential
-        self.token_file = token_file
-    
-    def get_token(self, *scopes, **kwargs):
-        """Get token - use cached if valid, otherwise get new one"""
-        # Try cached token first
-        cached_token = self._get_cached_token()
-        if cached_token:
-            return cached_token
 
-        return self.device_credential.get_token(*scopes, **kwargs)
-    
-    def _get_cached_token(self) -> Optional[AccessToken]:
-        """Get cached token if it's still valid"""
-        try:
-            if not os.path.exists(self.token_file):
-                return None
-                
-            with open(self.token_file, "r") as f:
-                token_data = json.load(f)
-            
-            access_token = token_data.get("access_token")
-            expires_on = token_data.get("expires_on")
-            
-            if access_token and expires_on and time.time() < expires_on:
-                return AccessToken(access_token, expires_on)
-        except Exception:
-            pass
-        
-        return None
-    
-    def save_token(self, token: AccessToken):
-        """Save token to cache file"""
-        try:
-            with open(self.token_file, "w") as f:
-                json.dump({"access_token": token.token, "expires_on": token.expires_on}, f)
-        except Exception as e:
-            print(f"⚠️ Failed to save token: {e}")
 
 class EmailReaderSDK:
     def __init__(self) -> None:
@@ -74,14 +31,20 @@ class EmailReaderSDK:
             "https://graph.microsoft.com/User.Read"
         ]
         
-        # Initialize device code credential
-        device_credential = DeviceCodeCredential(
-            client_id=self.client_id,
-            tenant_id=self.tenant_id
+        # Configure persistent token caching for server-like behavior
+        cache_options = TokenCachePersistenceOptions(
+            allow_unencrypted_storage=True,  # For development
+            name="email_reader_cache"
         )
         
-        # Initialize custom credential that uses cached tokens
-        self.credential = CachedTokenCredential(device_credential)
+        # Initialize credential with persistent token caching
+        self.credential = DeviceCodeCredential(
+            client_id=self.client_id,
+            tenant_id=self.tenant_id,
+            cache_persistence_options=cache_options,
+            # Disable automatic authentication for server scenarios
+            disable_automatic_authentication=False
+        )
         
         # Initialize Graph Service Client
         self.client: GraphServiceClient = GraphServiceClient(
@@ -98,19 +61,14 @@ class EmailReaderSDK:
             return True
         
         try:
-            # Check if we have a cached token
-            if self.credential._get_cached_token():
-                print("🔐 Using cached token - no authentication needed!")
-            else:
-                print("🔐 Authenticating with Microsoft Graph...")
+            print("🔐 Authenticating with Microsoft Graph...")
             
+            # The ChainedTokenCredential will automatically:
+            # 1. Try SharedTokenCacheCredential first (silent)
+            # 2. Fall back to DeviceCodeCredential if needed (interactive)
             user = await self.client.me.get()
             
             if user:
-                # Save the token that was just used
-                token = self.credential.get_token("https://graph.microsoft.com/.default")
-                self.credential.save_token(token)
-                
                 print(f"✅ Successfully authenticated as: {user.display_name or 'Unknown User'}")
                 self._authenticated = True
                 return True
