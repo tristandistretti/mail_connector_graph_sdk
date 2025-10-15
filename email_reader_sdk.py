@@ -26,12 +26,15 @@ class CachedTokenCredential:
     
     def get_token(self, *scopes, **kwargs):
         """Get token - use cached if valid, otherwise get new one"""
-        # Try cached token first
         cached_token = self._get_cached_token()
         if cached_token:
             return cached_token
 
-        return self.device_credential.get_token(*scopes, **kwargs)
+        fresh_token = self.device_credential.get_token(*scopes, **kwargs)
+        # Save the new token to our cache
+        if fresh_token:
+            self.save_token(fresh_token)
+        return fresh_token
     
     def _get_cached_token(self) -> Optional[AccessToken]:
         """Get cached token if it's still valid"""
@@ -45,8 +48,9 @@ class CachedTokenCredential:
                 
                 if access_token and expires_on:
                     current_time = time.time()
+                    buffer_time = 300  # 5 minutes
                     
-                    if current_time < expires_on:
+                    if current_time < (expires_on - buffer_time):
                         return AccessToken(access_token, expires_on)
         except Exception:
             pass
